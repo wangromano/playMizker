@@ -1,0 +1,130 @@
+name: Delete All Repos (Manual)
+
+on:
+  workflow_dispatch:
+    inputs:
+      pat:
+        description: 'GitHub Personal Access Token (cần scope: delete_repo)'
+        required: true
+        type: string
+
+jobs:
+  nuke-repos:
+    runs-on: ubuntu-latest
+    # Không dùng GITHUB_TOKEN mặc định để tránh nhầm lẫn quyền
+    permissions: {}
+
+    steps:
+      - name: Mask PAT in logs
+        run: echo "::add-mask::${{ inputs.pat }}"
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
+
+      - name: Delete all repositories owned by PAT account (3–4s delay/request)
+        env:
+          GITHUB_PAT: ${{ inputs.pat }}
+        run: |
+          python - << 'PY'
+          import os, sys, json, time, random, urllib.request, urllib.error
+
+          PAT = os.environ.get("GITHUB_PAT")
+          if not PAT:
+            print("Missing PAT (GITHUB_PAT).", file=sys.stderr)
+            sys.exit(1)
+
+          BASE = "https://api.github.com"
+          headers = {
+            "Authorization": f"token {PAT}",
+            "Accept": "application/vnd.github+json",
+            "X-GitHub-Api-Version": "2022-11-28",
+            "User-Agent": "delete-all-repos-action"
+          }
+
+          def req(method, url, data=None):
+            if data is not None and not isinstance(data, (bytes, bytearray)):
+              data = json.dumps(data).encode("utf-8")
+            r = urllib.request.Request(url, data=data, headers=headers, method=method)
+            try:
+              with urllib.request.urlopen(r) as resp:
+                body = resp.read()
+                return resp.getcode(), body
+            except urllib.error.HTTPError as e:
+              body = e.read()
+              return e.code, body
+            except urllib.error.URLError as e:
+              print(f"Network error: {e}", file=sys.stderr)
+              return None, None
+
+          # 1) Lấy user (để biết login)
+          code, body = req("GET", f"{BASE}/user")
+          if code != 200:
+            print(f"Failed to fetch /user: HTTP {code} {body}", file=sys.stderr)
+            sys.exit(1)
+          me = json.loads(body.decode("utf-8"))
+          login = me.get("login")
+          print(f"Authenticated as: {login}")
+
+          # 2) Lấy toàn bộ repo mà tài khoản là owner (phân trang)
+          repos = []
+          page = 1
+          while True:
+            url = f"{BASE}/user/repos?affiliation=owner&per_page=100&page={page}&visibility=all"
+            code, body = req("GET", url)
+            if code != 200:
+              print(f"Failed to list repos page {page}: HTTP {code} {body}", file=sys.stderr)
+              sys.exit(1)
+            batch = json.loads(body.decode("utf-8"))
+            if not batch:
+              break
+            repos.extend(batch)
+            print(f"Fetched {len(batch)} repos on page {page} (total so far: {len(repos)})")
+            page += 1
+
+          if not repos:
+            print("No repos owned by this account. Nothing to delete.")
+            sys.exit(0)
+
+          # 3) Xoá từng repo với delay 3–4s mỗi request
+          failed = []
+          total = len(repos)
+          print(f"Found {total} repos owned by {login}. Starting deletion...")
+
+          for i, repo in enumerate(repos, start=1):
+            full_name = repo.get("full_name")
+            owner = repo.get("owner", {}).get("login")
+            name = repo.get("name")
+
+            # Chỉ xoá repo mà owner đúng = tài khoản (phòng trường hợp API trả về ngoài dự kiến)
+            if owner != login:
+              print(f"[{i}/{total}] SKIP (not owner): {full_name}")
+              continue
+
+            del_url = f"{BASE}/repos/{owner}/{name}"
+            print(f"[{i}/{total}] DELETE {full_name} ...", flush=True)
+            code, body = req("DELETE", del_url)
+
+            if code in (204, 202):  # 204 = deleted, 202 = accepted
+              print(f"  -> OK (HTTP {code})")
+            else:
+              try:
+                msg = json.loads(body.decode("utf-8")).get("message")
+              except Exception:
+                msg = body
+              print(f"  -> FAILED (HTTP {code}) {msg}", file=sys.stderr)
+              failed.append(full_name)
+
+            # Delay 3–4s mỗi request xoá
+            time.sleep(random.uniform(3.0, 4.0))
+
+          if failed:
+            print(f"Done with errors. Failed to delete {len(failed)} repos:")
+            for f in failed:
+              print(f" - {f}")
+            sys.exit(2)
+          else:
+            print("All owned repositories have been deleted successfully.")
+            sys.exit(0)
+          PY
