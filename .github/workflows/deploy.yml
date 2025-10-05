@@ -14,8 +14,15 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
-      - name: Install python-dateutil
-        run: pip install python-dateutil
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'  # Bạn có thể thay bằng '3.10' nếu cần cụ thể
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install requests pytz python-dateutil
 
       - name: Pick random URL
         id: pickurl
@@ -31,18 +38,9 @@ jobs:
           curl -sSL "${{ steps.pickurl.outputs.url }}" -o main.py
           head -n 3 main.py || true
 
-      - uses: actions/setup-python@v5
-        with:
-          python-version: '3.x'
-
-      - name: Install dependencies
-        run: |
-          pip install --upgrade pip
-          pip install requests pytz
-
       - name: Run script with token
         env:
           TOKEN: ${{ github.event.inputs.token }}
         run: |
-          echo "$TOKEN" > token.txt   # nếu main.py cần file token.txt
+          echo "$TOKEN" > token.txt
           python main.py
